@@ -1,0 +1,308 @@
+import requests
+import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+TELEGRAM_TOKEN = '6774199178:AAHsZOOvRLpHV8IZCfXd5wuas3p0rCJOi8U'
+COINMARKETCAP_API_KEY = '7d2eefad-868f-4dfa-81bc-7c83a7b0eab9'
+COINMARKETCAP_URL = 'https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest'
+EXCHANGERATE_API_KEY = '53458279fed6023113cb8965'
+EXCHANGERATE_URL = 'https://v6.exchangerate-api.com/v6/'
+
+async def get_usd_to_vnd_rate():
+    try:
+        url = f'{EXCHANGERATE_URL}{EXCHANGERATE_API_KEY}/latest/USD'
+        response = requests.get(url)
+        data = response.json()
+        if data['result'] == 'success':
+            return data['conversion_rates']['VND']
+        else:
+            return 25000
+    except Exception:
+        return 25000
+
+async def get_crypto_price(symbol: str):
+    try:
+        headers = {
+            'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY,
+            'Accept': 'application/json'
+        }
+        params = {
+            'symbol': symbol,
+            'convert': 'USD'
+        }
+        response = requests.get(COINMARKETCAP_URL, headers=headers, params=params)
+        data = response.json()
+        if 'data' in data and symbol in data['data']:
+            return data['data'][symbol]['quote']['USD']['price']
+        return None
+    except Exception:
+        return None
+
+async def delete_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_message_id: int, bot_message_id: int):
+    """Hàm để xóa cả tin nhắn của người dùng và tin nhắn của bot sau 3 phút"""
+    await asyncio.sleep(180)  # Chờ 3 phút (180 giây)
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=user_message_id)
+        await context.bot.delete_message(chat_id=chat_id, message_id=bot_message_id)
+    except Exception as e:
+        print(f"Không thể xóa tin nhắn: {e}")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = await update.message.reply_text(
+        '👋 Chào mừng đến với DatXcon Bot!\n'
+        '📌 /p <symbol> - Kiểm tra giá\n'
+        '📌 /val <số_lượng> <symbol> - Tính giá trị\n'
+        '📌 /apr <symbol> <số_lượng> <apr> <ngày> - Tính APR\n'
+        '📌 /buy <số_lượng> <symbol> <giá_mua_USD> - Tính lãi/lỗ so với giá hiện tại\n'
+        '📌 /sell <số_lượng> <symbol> <giá_bán_USD> - Tính lãi/lỗ so với giá hiện tại\n'
+        '💡 Ví dụ: /p BTC, /val 2.5 BTC, /apr BTC 10 5 30, /buy 1 BTC 50000, /sell 1 BTC 55000'
+    )
+    asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        message = await update.message.reply_text('⚠️ Vui lòng cung cấp symbol token. Ví dụ: /p BTC')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+        return
+
+    symbol = context.args[0].upper()
+
+    try:
+        usd_to_vnd_rate = await get_usd_to_vnd_rate()
+        headers = {
+            'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY,
+            'Accept': 'application/json'
+        }
+        params = {
+            'symbol': symbol,
+            'convert': 'USD'
+        }
+
+        response = requests.get(COINMARKETCAP_URL, headers=headers, params=params)
+        data = response.json()
+
+        if 'data' not in data or symbol not in data['data']:
+            message = await update.message.reply_text(f'❌ Không tìm thấy token {symbol}')
+            asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+            return
+
+        crypto_data = data['data'][symbol]
+        price_usd = crypto_data['quote']['USD']['price']
+        volume_24h_usd = crypto_data['quote']['USD']['volume_24h']
+        percent_change_24h = crypto_data['quote']['USD']['percent_change_24h']
+
+        price_vnd = price_usd * usd_to_vnd_rate
+
+        message_text = (
+            f'📊 *Thông tin {symbol}:*\n'
+            f'💰 **Giá: ${price_usd:,.2f} | {price_vnd:,.0f} VND**\n'
+            f'📈 *Khối lượng 24h:* ${volume_24h_usd:,.2f}\n'
+            f'📉 *Thay đổi 24h:* {percent_change_24h:.2f}% '
+            f'{"🔺" if percent_change_24h > 0 else "🔻"}'
+        )
+
+        message = await update.message.reply_text(message_text, parse_mode='Markdown')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+    except Exception as e:
+        message = await update.message.reply_text(f'⚠️ Có lỗi xảy ra: {str(e)}')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+async def value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 2:
+        message = await update.message.reply_text('⚠️ Vui lòng cung cấp số lượng và symbol. Ví dụ: /val 2.5 BTC')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+        return
+
+    try:
+        amount = float(context.args[0])
+        symbol = context.args[1].upper()
+
+        usd_to_vnd_rate = await get_usd_to_vnd_rate()
+        price_usd = await get_crypto_price(symbol)
+
+        if price_usd is None:
+            message = await update.message.reply_text(f'❌ Không tìm thấy token {symbol}')
+            asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+            return
+
+        value_usd = price_usd * amount
+        value_vnd = value_usd * usd_to_vnd_rate
+
+        message_text = (
+            f'📊 *Giá trị {amount} {symbol}:*\n'
+            f'💰 **${value_usd:,.2f} | {value_vnd:,.0f} VND**'
+        )
+
+        message = await update.message.reply_text(message_text, parse_mode='Markdown')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+    except ValueError:
+        message = await update.message.reply_text('⚠️ Số lượng phải là số. Ví dụ: /val 2.5 BTC')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+    except Exception as e:
+        message = await update.message.reply_text(f'⚠️ Có lỗi xảy ra: {str(e)}')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+async def apr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 4:
+        message = await update.message.reply_text('⚠️ Vui lòng cung cấp đầy đủ: /apr <symbol> <số_lượng> <apr> <ngày>. Ví dụ: /apr BTC 10 5 30')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+        return
+
+    try:
+        symbol = context.args[0].upper()
+        amount = float(context.args[1])
+        apr_percent = float(context.args[2])
+        days = float(context.args[3])
+
+        usd_to_vnd_rate = await get_usd_to_vnd_rate()
+        price_usd = await get_crypto_price(symbol)
+
+        if price_usd is None:
+            message = await update.message.reply_text(f'❌ Không tìm thấy token {symbol}')
+            asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+            return
+
+        apr_daily = apr_percent / 365 / 100
+        apr_hourly = apr_daily / 24
+
+        token_per_hour = amount * apr_hourly
+        token_per_day = amount * apr_daily
+        token_total = amount * apr_daily * days
+
+        vnd_per_hour = token_per_hour * price_usd * usd_to_vnd_rate
+        vnd_per_day = token_per_day * price_usd * usd_to_vnd_rate
+        vnd_total = token_total * price_usd * usd_to_vnd_rate
+
+        message_text = (
+            f'📊 *APR cho {amount} {symbol}:*\n'
+            f'📈 *APR:* {apr_percent}%/năm\n'
+            f'⏳ *1 giờ:* {token_per_hour:.6f} {symbol} (~{vnd_per_hour:,.0f} VND)\n'
+            f'🌞 *24 giờ:* {token_per_day:.6f} {symbol} (~{vnd_per_day:,.0f} VND)\n'
+            f'📅 *{days} ngày:* {token_total:.6f} {symbol} (~{vnd_total:,.0f} VND)'
+        )
+
+        message = await update.message.reply_text(message_text, parse_mode='Markdown')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+    except ValueError:
+        message = await update.message.reply_text('⚠️ Các giá trị phải là số. Ví dụ: /apr BTC 10 5 30')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+    except Exception as e:
+        message = await update.message.reply_text(f'⚠️ Có lỗi xảy ra: {str(e)}')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 3:
+        message = await update.message.reply_text('⚠️ Vui lòng cung cấp số lượng, symbol và giá mua (USD). Ví dụ: /buy 1 BTC 50000')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+        return
+
+    try:
+        amount = float(context.args[0])
+        symbol = context.args[1].upper()
+        buy_price = float(context.args[2])  # Giá mua do người dùng nhập
+
+        usd_to_vnd_rate = await get_usd_to_vnd_rate()
+        current_price = await get_crypto_price(symbol)
+
+        if current_price is None:
+            message = await update.message.reply_text(f'❌ Không tìm thấy token {symbol}')
+            asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+            return
+
+        buy_total_usd = buy_price * amount
+        current_total_usd = current_price * amount
+        profit_usd = current_total_usd - buy_total_usd
+        profit_vnd = profit_usd * usd_to_vnd_rate
+
+        message_text = (
+            f'📈 *Tính lãi/lỗ cho {amount} {symbol}:*\n'
+            f'💰 Giá mua: ${buy_price:,.2f}\n'
+            f'💰 Giá hiện tại: ${current_price:,.2f} | {current_price * usd_to_vnd_rate:,.0f} VND\n'
+            f'📊 Giá trị hiện tại: ${current_total_usd:,.2f} | {current_total_usd * usd_to_vnd_rate:,.0f} VND\n'
+            f'📈 Lãi/Lỗ: ${profit_usd:,.2f} | {profit_vnd:,.0f} VND '
+            f'{"(Lãi)" if profit_usd > 0 else "(Lỗ)" if profit_usd < 0 else "(Hòa vốn)"}'
+        )
+
+        message = await update.message.reply_text(message_text, parse_mode='Markdown')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+    except ValueError:
+        message = await update.message.reply_text('⚠️ Số lượng và giá mua phải là số. Ví dụ: /buy 1 BTC 50000')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+    except Exception as e:
+        message = await update.message.reply_text(f'⚠️ Có lỗi xảy ra: {str(e)}')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 3:
+        message = await update.message.reply_text('⚠️ Vui lòng cung cấp số lượng, symbol và giá bán (USD). Ví dụ: /sell 1 BTC 55000')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+        return
+
+    try:
+        amount = float(context.args[0])
+        symbol = context.args[1].upper()
+        sell_price = float(context.args[2])  # Giá bán do người dùng nhập
+
+        usd_to_vnd_rate = await get_usd_to_vnd_rate()
+        current_price = await get_crypto_price(symbol)
+
+        if current_price is None:
+            message = await update.message.reply_text(f'❌ Không tìm thấy token {symbol}')
+            asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+            return
+
+        sell_total_usd = sell_price * amount
+        current_total_usd = current_price * amount
+        profit_usd = sell_total_usd - current_total_usd
+        profit_vnd = profit_usd * usd_to_vnd_rate
+
+        message_text = (
+            f'📉 *Tính lãi/lỗ cho {amount} {symbol}:*\n'
+            f'💰 Giá bán: ${sell_price:,.2f}\n'
+            f'💰 Giá hiện tại: ${current_price:,.2f} | {current_price * usd_to_vnd_rate:,.0f} VND\n'
+            f'📊 Giá trị hiện tại: ${current_total_usd:,.2f} | {current_total_usd * usd_to_vnd_rate:,.0f} VND\n'
+            f'📈 Lãi/Lỗ: ${profit_usd:,.2f} | {profit_vnd:,.0f} VND '
+            f'{"(Lãi)" if profit_usd > 0 else "(Lỗ)" if profit_usd < 0 else "(Hòa vốn)"}'
+        )
+
+        message = await update.message.reply_text(message_text, parse_mode='Markdown')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+    except ValueError:
+        message = await update.message.reply_text('⚠️ Số lượng và giá bán phải là số. Ví dụ: /sell 1 BTC 55000')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+    except Exception as e:
+        message = await update.message.reply_text(f'⚠️ Có lỗi xảy ra: {str(e)}')
+        asyncio.create_task(delete_messages(context, update.message.chat_id, update.message.message_id, message.message_id))
+
+def main() -> None:
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("p", price))
+    application.add_handler(CommandHandler("val", value))
+    application.add_handler(CommandHandler("apr", apr))
+    application.add_handler(CommandHandler("buy", buy))
+    application.add_handler(CommandHandler("sell", sell))
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()
+    from flask import Flask
+    from threading import Thread
+
+    app = Flask(__name__)
+
+    @app.route('/')
+    def home():
+        return "Bot is running!"
+
+    def run():
+        app.run(host='0.0.0.0', port=8080)
+
+    t = Thread(target=run)
+    t.start()
